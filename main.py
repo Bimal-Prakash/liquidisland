@@ -555,6 +555,41 @@ class LiquidIsland(QWidget):
         threading.Thread(target=_seek, daemon=True).start()
 
     def mousePressEvent(self, event):
+        # Right-click context menu
+        if event.button() == Qt.MouseButton.RightButton:
+            from PyQt6.QtWidgets import QMenu
+            from PyQt6.QtGui import QAction
+            menu = QMenu(self)
+            menu.setStyleSheet("""
+                QMenu {
+                    background-color: #1a1a1a;
+                    border: 1px solid #333;
+                    border-radius: 8px;
+                    padding: 5px;
+                }
+                QMenu::item {
+                    color: white;
+                    padding: 8px 25px;
+                    font-size: 13px;
+                }
+                QMenu::item:selected {
+                    background-color: #333;
+                    border-radius: 4px;
+                }
+            """)
+            
+            quit_action = QAction("Quit", self)
+            quit_action.triggered.connect(QApplication.quit)
+            
+            uninstall_action = QAction("Uninstall", self)
+            uninstall_action.triggered.connect(self.uninstall_app)
+            
+            menu.addAction(quit_action)
+            menu.addSeparator()
+            menu.addAction(uninstall_action)
+            menu.exec(event.globalPosition().toPoint())
+            return
+        
         if self.current_state == "idle":
             self.state_changed_signal.emit("mini_player")
         elif self.current_state == "mini_player":
@@ -684,6 +719,36 @@ class LiquidIsland(QWidget):
                 self.media_pos = self.seek_target_pos
                 self.seek_media(self.drag_pct)
             self.dragging_progress = False
+
+    def uninstall_app(self):
+        from PyQt6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self, "Uninstall liquidisland",
+            "Are you sure you want to uninstall liquidisland?\n\nThis will remove it from startup and delete the installed files.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            # Remove startup registry key
+            try:
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
+                winreg.DeleteValue(key, "liquidisland")
+                winreg.CloseKey(key)
+            except Exception:
+                pass
+            
+            # Schedule deletion of installed files after exit
+            appdata = os.getenv('APPDATA')
+            install_dir = os.path.join(appdata, 'liquidisland')
+            if os.path.exists(install_dir):
+                # Use a cmd command that waits 2 seconds then deletes the folder
+                subprocess.Popen(
+                    f'ping 127.0.0.1 -n 3 > nul & rmdir /s /q "{install_dir}"',
+                    shell=True
+                )
+            
+            QMessageBox.information(self, "Uninstalled", "liquidisland has been uninstalled successfully.")
+            QApplication.quit()
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
