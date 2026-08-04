@@ -29,9 +29,16 @@ def install():
         QMessageBox.critical(None, "Error", "Installation payload not found!")
         return
         
+    # Kill any running instance first so we can overwrite the file
     try:
-        # If already running, we might not be able to overwrite it.
-        # But this is a fresh install for friends.
+        subprocess.run(['taskkill', '/F', '/IM', 'liquidisland.exe'], 
+                       capture_output=True, timeout=5)
+        import time
+        time.sleep(1)  # Give Windows time to release the file lock
+    except Exception:
+        pass  # No running instance, that's fine
+        
+    try:
         shutil.copy2(source_exe, target_exe)
     except Exception as e:
         QMessageBox.critical(None, "Installation Failed", f"Could not copy files: {e}")
