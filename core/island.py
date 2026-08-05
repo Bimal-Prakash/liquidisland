@@ -16,7 +16,7 @@ class LiquidIsland(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setWindowTitle("LiquidIsland")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
@@ -49,6 +49,9 @@ class LiquidIsland(QWidget):
         
         self.accent_color = QColor(0, 255, 204)
         self.update_system_accent_color()
+
+    def closeEvent(self, event):
+        event.ignore()
 
     def show_module_popup(self, module, duration_ms: int = 3000):
         if hasattr(self, 'cycle_list') and module in self.cycle_list:
@@ -172,7 +175,8 @@ class LiquidIsland(QWidget):
         else: # mini_player
             target_width, target_height = self.active_module.get_expanded_size()
             
-        screen_geo = self.screen().availableGeometry()
+        scr = self.screen() or QApplication.primaryScreen()
+        screen_geo = scr.availableGeometry() if scr else QRect(0, 0, 1920, 1080)
         target_x = max(screen_geo.left(), min(self.center_x - (target_width // 2), screen_geo.right() - target_width + 1))
         target_y = max(screen_geo.top(), min(self.y_pos, screen_geo.bottom() - target_height + 1))
         
