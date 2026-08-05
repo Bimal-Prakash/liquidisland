@@ -21,3 +21,6 @@ Thumbs.db
 # Logs
 *.log
 debug_log.txt
+
+#ponytail
+AGENTS.md
