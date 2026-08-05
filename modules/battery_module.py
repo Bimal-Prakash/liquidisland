@@ -80,7 +80,8 @@ class BatteryModule(BaseModule):
                 try:
                     # pyrefly: ignore [missing-import]
                     import winsdk.windows.system.power as winpower
-                    self.energy_saver_on = (int(winpower.PowerManager.energy_saver_status) != 0)
+                    if not getattr(self, 'user_override_saver', False):
+                        self.energy_saver_on = (int(winpower.PowerManager.energy_saver_status) != 0)
                 except Exception:
                     pass
             except Exception:
@@ -204,6 +205,10 @@ class BatteryModule(BaseModule):
         text_rect = QRect(20, 125, rect.width() - 40, 30)
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, status)
 
+    def on_mouse_press(self, x: int, y: int, state: str):
+        if state == "mini_player":
+            threading.Thread(target=self.toggle_energy_saver_sync, daemon=True).start()
+
     def on_double_click(self, x, y, state):
         threading.Thread(target=self.toggle_energy_saver_sync, daemon=True).start()
 
@@ -212,25 +217,63 @@ class BatteryModule(BaseModule):
             import subprocess
             import re
             
+            NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
             saver_overlay = '961cc777-2547-4f9d-8174-7d86181b8a7a'
-            off_overlay = '27fa6203-3987-4dcc-918d-748559d549ec'
+            off_overlay = '381b4222-f694-41f0-9685-ff5bb260df2e'
 
             new_state = not getattr(self, 'energy_saver_on', False)
             self.energy_saver_on = new_state
+            self.user_override_saver = True
 
             if new_state:
+                # 1. Dim brightness to 30% to conserve display power
                 try:
-                    activescheme = subprocess.check_output(['powercfg', '/getactivescheme'], text=True, errors='ignore')
+                    # pyrefly: ignore [missing-import]
+                    import screen_brightness_control as sbc
+                    cb = sbc.get_brightness()
+                    if cb:
+                        self._prev_brightness = cb[0]
+                    sbc.set_brightness(30)
+                except Exception:
+                    pass
+
+                # 2. Cap CPU Max State to 50% (System Processor Power Management)
+                try:
+                    subprocess.run(['powercfg', '/setdcvalueindex', 'SCHEME_CURRENT', 'SUB_PROCESSOR', 'PROCTHROTTLEMAX', '50'], capture_output=True, creationflags=NO_WINDOW)
+                    subprocess.run(['powercfg', '/setacvalueindex', 'SCHEME_CURRENT', 'SUB_PROCESSOR', 'PROCTHROTTLEMAX', '50'], capture_output=True, creationflags=NO_WINDOW)
+                except Exception:
+                    pass
+
+                # 3. System Power Scheme Overlay (Better Battery-life)
+                try:
+                    activescheme = subprocess.check_output(['powercfg', '/getactivescheme'], text=True, errors='ignore', creationflags=NO_WINDOW)
                     match = re.search(r'([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})', activescheme)
                     if match and match.group(1).lower() != saver_overlay:
                         self._prev_power_scheme = match.group(1)
                 except Exception:
                     pass
 
-                subprocess.run(['powercfg', '/setactive', saver_overlay], capture_output=True)
+                subprocess.run(['powercfg', '/setactive', saver_overlay], capture_output=True, creationflags=NO_WINDOW)
             else:
+                # 1. Restore screen brightness
+                try:
+                    # pyrefly: ignore [missing-import]
+                    import screen_brightness_control as sbc
+                    target_b = getattr(self, '_prev_brightness', 80)
+                    sbc.set_brightness(target_b)
+                except Exception:
+                    pass
+
+                # 2. Restore 100% CPU Max State (Full Processor Performance)
+                try:
+                    subprocess.run(['powercfg', '/setdcvalueindex', 'SCHEME_CURRENT', 'SUB_PROCESSOR', 'PROCTHROTTLEMAX', '100'], capture_output=True, creationflags=NO_WINDOW)
+                    subprocess.run(['powercfg', '/setacvalueindex', 'SCHEME_CURRENT', 'SUB_PROCESSOR', 'PROCTHROTTLEMAX', '100'], capture_output=True, creationflags=NO_WINDOW)
+                except Exception:
+                    pass
+
+                # 3. Restore active power scheme
                 target_plan = getattr(self, '_prev_power_scheme', off_overlay)
-                subprocess.run(['powercfg', '/setactive', target_plan], capture_output=True)
+                subprocess.run(['powercfg', '/setactive', target_plan], capture_output=True, creationflags=NO_WINDOW)
 
             if hasattr(self.island, 'update'):
                 self.island.update()

@@ -19,6 +19,7 @@ class LiquidIsland(QWidget):
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setWindowTitle("LiquidIsland")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setMouseTracking(True)
         
         self.current_state = "idle"
         self.height_ = 48
@@ -33,7 +34,11 @@ class LiquidIsland(QWidget):
         self.scroll_sensitivity = int(QSettings("LiquidIsland", "Settings").value("scroll_sensitivity", 37))
         
         # Initial geometry
-        screen = QApplication.primaryScreen().geometry()
+        primary_screen = QApplication.primaryScreen()
+        if primary_screen:
+            primary_screen.geometryChanged.connect(self.reposition_to_top_center)
+            primary_screen.logicalDotsPerInchChanged.connect(self.reposition_to_top_center)
+        screen = primary_screen.geometry() if primary_screen else QRect(0, 0, 1920, 1080)
         self.center_x = screen.width() // 2
         self.y_pos = 10
         self.setGeometry(self.center_x - 60, self.y_pos, 120, self.height_)
@@ -137,13 +142,17 @@ class LiquidIsland(QWidget):
         if self.anim_step % 50 == 0:
             self.update_system_accent_color()
             
-        new_active = self.get_active_module()
-        if new_active != self.active_module:
-            self.active_module = new_active
-            self.animate_state_change(self.current_state)
+        # Do not switch active module while a popup timer (e.g. LockStatusModule) is currently active
+        if not (hasattr(self, 'popup_timer') and self.popup_timer.isActive()):
+            new_active = self.get_active_module()
+            if new_active != self.active_module:
+                self.active_module = new_active
+                if not (hasattr(self, 'geom_anim') and self.geom_anim.state() == QPropertyAnimation.State.Running):
+                    self.animate_state_change(self.current_state)
             
-        if self.active_module and hasattr(self.active_module, 'on_tick'):
-            self.active_module.on_tick(self.anim_step)
+        for mod in self.modules:
+            if hasattr(mod, 'on_tick'):
+                mod.on_tick(self.anim_step)
             
         # Global click detection for dismissal
         if self.current_state == "mini_player":
@@ -156,6 +165,9 @@ class LiquidIsland(QWidget):
         self.update()
 
     def animate_state_change(self, new_state):
+        if hasattr(self, 'geom_anim') and self.geom_anim.state() == QPropertyAnimation.State.Running:
+            self.geom_anim.stop()
+
         if new_state == "ready":
             QTimer.singleShot(300, self.show)
             new_state = "idle"
@@ -218,6 +230,12 @@ class LiquidIsland(QWidget):
         painter.setPen(QPen(QBrush(pen_gradient), 1.5))
         painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), radius, radius)
         
+        # pyrefly: ignore [missing-import]
+        from PyQt6.QtGui import QPainterPath
+        clip_path = QPainterPath()
+        clip_path.addRoundedRect(QRectF(rect), radius, radius)
+        painter.setClipPath(clip_path)
+
         if self.active_module:
             if self.current_state == "idle":
                 self.active_module.paint_idle(painter, rect, self.anim_step)
@@ -256,10 +274,6 @@ class LiquidIsland(QWidget):
             self.show_context_menu(event.globalPosition().toPoint())
             return
             
-        self.oldPos = event.globalPosition().toPoint()
-        self._pressed_pos = event.position().toPoint()
-        self.is_dragging = False
-        
         if self.current_state == "mini_player":
             if self.active_module:
                 self.active_module.on_mouse_press(event.position().x(), event.position().y(), self.current_state)
@@ -267,40 +281,33 @@ class LiquidIsland(QWidget):
     def mouseMoveEvent(self, event):
         if hasattr(self, 'geom_anim') and self.geom_anim.state() == QPropertyAnimation.State.Running:
             return
-            
-        if self.current_state == "idle":
-            if hasattr(self, '_pressed_pos'):
-                dist = (event.position().toPoint() - self._pressed_pos).manhattanLength()
-                if dist > 3:
-                    self.is_dragging = True
-                    
-            if getattr(self, 'is_dragging', False) and hasattr(self, 'oldPos'):
-                delta = QPoint(event.globalPosition().toPoint() - self.oldPos)
-                new_x = self.x() + delta.x()
-                new_y = self.y() + delta.y()
-                screen_geo = self.screen().availableGeometry()
-                new_x = max(screen_geo.left(), min(new_x, screen_geo.right() - self.width() + 1))
-                new_y = max(screen_geo.top(), min(new_y, screen_geo.bottom() - self.height() + 1))
-                self.move(new_x, new_y)
-                self.oldPos = event.globalPosition().toPoint()
-                return
                 
         if self.active_module:
             self.active_module.on_mouse_move(event.position().x(), event.position().y(), self.current_state)
 
-    def mouseReleaseEvent(self, event):
-        was_dragging = getattr(self, 'is_dragging', False)
-        self.is_dragging = False
-        
-        if self.current_state == "idle" and not was_dragging:
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        if self.current_state == "idle":
             self.state_changed_signal.emit("mini_player")
-            
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        if self.active_module:
+            if getattr(self.active_module, 'dragging_vol', False) or getattr(self.active_module, 'dragging_bright', False):
+                return
+        if self.current_state == "mini_player":
+            self.state_changed_signal.emit("idle")
+
+    def mouseReleaseEvent(self, event):
         if self.active_module:
             self.active_module.on_mouse_release(event.position().x(), event.position().y(), self.current_state)
 
+        if not self.rect().contains(event.position().toPoint()):
+            if self.current_state == "mini_player":
+                self.state_changed_signal.emit("idle")
+
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            
             if self.active_module and hasattr(self.active_module, 'on_double_click'):
                 self.active_module.on_double_click(event.position().x(), event.position().y(), self.current_state)
             else:
@@ -357,28 +364,56 @@ class LiquidIsland(QWidget):
         # pyrefly: ignore [missing-import]
         from PyQt6.QtCore import Qt
 
+        glass_style = '''
+            QMenu {
+                background-color: rgba(10, 10, 12, 0.92);
+                border: 1px solid rgba(255, 255, 255, 0.18);
+                border-radius: 16px;
+                padding: 6px;
+            }
+            QMenu::item {
+                color: #FFFFFF;
+                padding: 10px 22px;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 13px;
+                font-weight: 500;
+                border-radius: 10px;
+                margin: 2px 2px;
+            }
+            QMenu::item:selected {
+                background-color: rgba(255, 255, 255, 0.15);
+                color: #FFFFFF;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: rgba(255, 255, 255, 0.12);
+                margin: 6px 8px;
+            }
+        '''
+
         menu = QMenu(self)
-        menu.setStyleSheet('''
-            QMenu { background-color: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 5px; }
-            QMenu::item { color: white; padding: 8px 25px; font-size: 13px; }
-            QMenu::item:selected { background-color: #333; border-radius: 4px; }
-        ''')
+        menu.setWindowFlags(menu.windowFlags() | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
+        menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        menu.setStyleSheet(glass_style)
 
         sens_menu = QMenu("Sensitivity", self)
-        sens_menu.setStyleSheet(menu.styleSheet())
+        sens_menu.setWindowFlags(sens_menu.windowFlags() | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
+        sens_menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        sens_menu.setStyleSheet(glass_style)
         
         sens_action = QWidgetAction(self)
         sens_widget = QWidget()
         sens_layout = QHBoxLayout(sens_widget)
-        sens_layout.setContentsMargins(10, 5, 10, 5)
+        sens_layout.setContentsMargins(12, 6, 12, 6)
         
         sens_slider = QSlider(Qt.Orientation.Horizontal)
         sens_slider.setRange(25, 50)
-        sens_slider.setMinimumWidth(100)
+        sens_slider.setMinimumWidth(120)
         sens_slider.setValue(getattr(self, 'scroll_sensitivity', 37))
         sens_slider.setStyleSheet('''
-            QSlider::groove:horizontal { border-radius: 2px; height: 4px; background: #555; }
-            QSlider::handle:horizontal { background: white; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px; }
+            QSlider::groove:horizontal { border-radius: 3px; height: 6px; background: rgba(255, 255, 255, 0.2); }
+            QSlider::handle:horizontal { background: #FFFFFF; width: 14px; height: 14px; margin: -4px 0; border-radius: 7px; }
+            QSlider::sub-page:horizontal { background: rgba(255, 255, 255, 0.8); border-radius: 3px; }
         ''')
         
         def on_sens_changed(val):
@@ -405,6 +440,20 @@ class LiquidIsland(QWidget):
         menu.addAction(uninstall_action)
         menu.exec(pos)
 
+        # Re-center on primary screen resolution or DPI changes
+        primary_screen = QApplication.primaryScreen()
+        if primary_screen:
+            primary_screen.geometryChanged.connect(self.reposition_to_top_center)
+
+    def reposition_to_top_center(self):
+        try:
+            screen = QApplication.primaryScreen().geometry()
+            self.center_x = screen.width() // 2
+            current_w = self.width()
+            self.move(self.center_x - current_w // 2, self.y_pos)
+        except Exception:
+            pass
+
     def uninstall_app(self):
         import subprocess
         # pyrefly: ignore [missing-import]
@@ -419,6 +468,10 @@ class LiquidIsland(QWidget):
                 winreg.CloseKey(key)
             except Exception: pass
             
+            try:
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall\LiquidIsland")
+            except Exception: pass
+
             install_dir = os.path.join(os.getenv('APPDATA'), 'liquidisland')
             if os.path.exists(install_dir):
                 subprocess.Popen(f'ping 127.0.0.1 -n 3 > nul & rmdir /s /q "{install_dir}"', shell=True)

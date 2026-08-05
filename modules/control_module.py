@@ -79,23 +79,31 @@ class ControlModule(BaseModule):
 
     # ── COM Worker (Volume) ──────────────────────────────────────────
     def _com_worker(self):
-        """Single long-lived thread that owns all COM objects."""
+        """Single long-lived thread that handles audio COM interface robustly."""
         comtypes.CoInitialize()
+        vol_ctrl = None
+
         try:
-            # Cache the volume interface once
-            devices = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            vol_ctrl = cast(interface, POINTER(IAudioEndpointVolume))
-
             while self._running:
-                # Read current volume level
-                try:
-                    if not self.dragging_vol and (time.time() - self._vol_set_time) > self._COOLDOWN:
-                        self.volume_level = vol_ctrl.GetMasterVolumeLevelScalar()
-                except Exception:
-                    pass
+                # Try acquiring volume interface if not cached
+                if vol_ctrl is None:
+                    try:
+                        devices = AudioUtilities.GetSpeakers()
+                        if devices:
+                            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                            vol_ctrl = cast(interface, POINTER(IAudioEndpointVolume))
+                    except Exception:
+                        vol_ctrl = None
 
-                # Drain any pending set-volume commands (use latest only)
+                # Read current volume level
+                if vol_ctrl is not None:
+                    try:
+                        if not self.dragging_vol and (time.time() - self._vol_set_time) > self._COOLDOWN:
+                            self.volume_level = vol_ctrl.GetMasterVolumeLevelScalar()
+                    except Exception:
+                        vol_ctrl = None
+
+                # Drain any pending set-volume commands
                 target = None
                 while not self._vol_queue.empty():
                     try:
@@ -104,36 +112,35 @@ class ControlModule(BaseModule):
                         break
 
                 if target is not None:
-                    try:
-                        vol_ctrl.SetMasterVolumeLevelScalar(target, None)
-                    except Exception:
-                        pass
+                    if vol_ctrl is None:
+                        try:
+                            devices = AudioUtilities.GetSpeakers()
+                            if devices:
+                                interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                                vol_ctrl = cast(interface, POINTER(IAudioEndpointVolume))
+                        except Exception:
+                            vol_ctrl = None
+
+                    if vol_ctrl is not None:
+                        try:
+                            vol_ctrl.SetMasterVolumeLevelScalar(target, None)
+                        except Exception:
+                            vol_ctrl = None
 
                 if hasattr(self.island, 'update'):
                     self.island.update()
 
-                # Sleep briefly — fast enough for drag responsiveness
                 time.sleep(0.05)
 
         except Exception:
             pass
-        # COM objects are released here while COM is still initialized
-        # then we uninitialize
-        comtypes.CoUninitialize()
+        finally:
+            comtypes.CoUninitialize()
 
     # ── Brightness Worker ────────────────────────────────────────────
     def _brightness_worker(self):
         """Dedicated thread for brightness reads/writes (no COM needed)."""
         while self._running:
-            # Read current brightness
-            try:
-                if not self.dragging_bright and (time.time() - self._bright_set_time) > self._COOLDOWN:
-                    brights = sbc.get_brightness()
-                    if brights and len(brights) > 0:
-                        self.brightness_level = brights[0] / 100.0
-            except Exception:
-                pass
-
             # Drain any pending set-brightness commands (use latest only)
             target = None
             while not self._bright_queue.empty():
@@ -144,7 +151,24 @@ class ControlModule(BaseModule):
 
             if target is not None:
                 try:
+                    self._last_set_brightness = target
+                    self._bright_set_time = time.time()
+                    # pyrefly: ignore [missing-import]
+                    import screen_brightness_control as sbc
                     sbc.set_brightness(int(target * 100), display=0)
+                except Exception:
+                    pass
+            else:
+                # Read current brightness only if idle for > 4.0 seconds and not stale
+                try:
+                    if not self.dragging_bright and (time.time() - getattr(self, '_bright_set_time', 0.0)) > 4.0:
+                        # pyrefly: ignore [missing-import]
+                        import screen_brightness_control as sbc
+                        brights = sbc.get_brightness()
+                        if brights and len(brights) > 0:
+                            read_val = brights[0] / 100.0
+                            if not hasattr(self, '_last_set_brightness') or abs(read_val - self._last_set_brightness) < 0.15:
+                                self.brightness_level = read_val
                 except Exception:
                     pass
 

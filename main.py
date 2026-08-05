@@ -10,6 +10,7 @@ from modules.bluetooth_module import BluetoothModule
 from modules.battery_module import BatteryModule
 from modules.camera_module import CameraModule
 from modules.control_module import ControlModule
+from modules.lock_status_module import LockStatusModule
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [UI Wrapper] %(message)s")
 logging.getLogger("screen_brightness_control").setLevel(logging.CRITICAL)
@@ -86,7 +87,29 @@ def prompt_install():
             # User refused install
             sys.exit(0)
 
+def disable_process_power_throttling():
+    """Exempts Liquid Island from Windows EcoQoS / Power Throttling so its animations and rendering remain 100% smooth."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        class PROCESS_POWER_THROTTLING_STATE(ctypes.Structure):
+            _fields_ = [
+                ("Version", wintypes.DWORD),
+                ("ControlMask", wintypes.DWORD),
+                ("StateMask", wintypes.DWORD),
+            ]
+        state = PROCESS_POWER_THROTTLING_STATE()
+        state.Version = 1
+        state.ControlMask = 1 # PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+        state.StateMask = 0   # 0 = High performance, no throttling
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetCurrentProcess()
+        kernel32.SetProcessInformation(handle, 24, ctypes.byref(state), ctypes.sizeof(state))
+    except Exception:
+        pass
+
 def main():
+    disable_process_power_throttling()
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(get_resource_path('icon.ico')))
     prompt_install()
@@ -102,6 +125,7 @@ def main():
     island.register_module(BatteryModule)
     island.register_module(CameraModule)
     island.register_module(ControlModule)
+    island.register_module(LockStatusModule)
     
     island.state_changed_signal.emit("ready")
     island.show()

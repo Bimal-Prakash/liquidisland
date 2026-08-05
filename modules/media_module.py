@@ -151,13 +151,7 @@ class MediaModule(BaseModule):
             
         is_new_track = (not hasattr(self, '_last_title') or self._last_title != title)
         self._last_title = title
-        if pos == 0.0 and not is_new_track and getattr(self, 'media_pos', 0) > 2.0:
-            if not hasattr(self, '_zero_glitch_count'):
-                self._zero_glitch_count = 0
-            self._zero_glitch_count += 1
-            if self._zero_glitch_count < 3:
-                return 
-                
+        
         if not hasattr(self, 'last_raw_pos'):
             self.last_raw_pos = -1.0
         is_fresh_update = (pos != self.last_raw_pos) or is_new_track
@@ -165,24 +159,17 @@ class MediaModule(BaseModule):
         
         if is_new_track and hasattr(self, 'last_seek_time'):
             self.last_seek_time = 0
-        
-        if hasattr(self, 'last_seek_time') and time.time() - self.last_seek_time < 3.0:
+            
+        if hasattr(self, 'last_seek_time') and time.time() - self.last_seek_time < 1.5:
             pos = getattr(self, 'seek_target_pos', self.media_pos)
         else:
-            if not hasattr(self, 'media_pos'):
+            if not hasattr(self, 'media_pos') or is_new_track:
                 self.media_pos = pos
-            elif not is_fresh_update:
-                pos = self.media_pos
-            elif abs(self.media_pos - pos) > 3.0:
-                self.media_pos = pos
-            elif pos > self.media_pos:
-                self.media_pos = pos
-            else:
-                pos = self.media_pos
-                
+            elif is_fresh_update:
+                if abs(self.media_pos - pos) > 0.5:
+                    self.media_pos = pos
+                    
         self.is_playing = playing
-        if not (hasattr(self, 'last_seek_time') and time.time() - self.last_seek_time < 3.0):
-            self.media_pos = pos
         self.media_end = end
         
         if thumb_bytes and thumb_bytes != self.media_thumb_bytes:
@@ -239,7 +226,7 @@ class MediaModule(BaseModule):
 
     def paint_idle(self, painter: QPainter, rect: QRect, anim_step: int):
         art_size = 32
-        art_x, art_y = 10, int((rect.height() - art_size) / 2)
+        art_x, art_y = 10, (48 - art_size) // 2
         if self.media_thumb_pixmap:
             scaled_pix = self.media_thumb_pixmap.scaled(art_size, art_size, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
             crop_rect = QRect((scaled_pix.width() - art_size) // 2, (scaled_pix.height() - art_size) // 2, art_size, art_size)
@@ -374,13 +361,21 @@ class MediaModule(BaseModule):
                 
             if BTN_Y_MIN <= y <= BTN_Y_MAX:
                 if PREV_X_MIN <= x <= PREV_X_MAX:
-                    self.last_seek_time = 0
-                    self.media_pos = 0.0
-                    ctypes.windll.user32.keybd_event(0xB1, 0, 0, 0)
+                    if self.media_pos > 3.0:
+                        self.last_seek_time = time.time()
+                        self.seek_target_pos = 0.0
+                        self.media_pos = 0.0
+                        self.seek_media(0.0)
+                    else:
+                        self.last_seek_time = 0
+                        self.media_pos = 0.0
+                        ctypes.windll.user32.keybd_event(0xB1, 0, 0, 0)
+                        ctypes.windll.user32.keybd_event(0xB1, 0, 2, 0)
                     return
                 elif PLAY_X_MIN <= x <= PLAY_X_MAX:
                     self.last_toggle_time = time.time()
                     ctypes.windll.user32.keybd_event(0xB3, 0, 0, 0)
+                    ctypes.windll.user32.keybd_event(0xB3, 0, 2, 0)
                     self.is_playing = not self.is_playing
                     self.island.update()
                     return
@@ -388,26 +383,48 @@ class MediaModule(BaseModule):
                     self.last_seek_time = 0
                     self.media_pos = 0.0
                     ctypes.windll.user32.keybd_event(0xB0, 0, 0, 0)
+                    ctypes.windll.user32.keybd_event(0xB0, 0, 2, 0)
                     return
                     
             if FOCUS_Y_MIN <= y <= FOCUS_Y_MAX and FOCUS_X_MIN <= x <= FOCUS_X_MAX and self.media_app_name:
                 def focus_app():
                     try:
+                        import re
                         # pyrefly: ignore [missing-import]
                         import pygetwindow as gw
-                        app_query = self.media_app_name.lower()
+                        app_name = self.media_app_name.lower()
+                        track_title = self.media_title.lower().strip() if self.media_title else ""
+                        clean_words = [w for w in re.sub(r'[^a-zA-Z0-9\s]', '', track_title).split() if len(w) > 2]
+                        
                         target_win = None
-                        for win in gw.getAllWindows():
-                            if win.title and win.title != "Program Manager":
-                                if app_query in win.title.lower():
-                                    target_win = win
-                                    break
-                                if app_query == "chrome" and "chrome" in win.title.lower():
-                                    target_win = win
-                                    break
-                                if app_query == "msedge" and "edge" in win.title.lower():
-                                    target_win = win
-                                    break
+                        
+                        # 1. Try finding a window whose title matches the specific track/media title
+                        if clean_words:
+                            for win in gw.getAllWindows():
+                                if win.title and win.title != "Program Manager":
+                                    w_title = win.title.lower()
+                                    if any(word in w_title for word in clean_words):
+                                        target_win = win
+                                        break
+                                        
+                        # 2. Fallback: find window matching app_name (e.g. "chrome", "spotify", "vlc")
+                        if not target_win:
+                            for win in gw.getAllWindows():
+                                if win.title and win.title != "Program Manager":
+                                    w_title = win.title.lower()
+                                    if app_name and app_name in w_title:
+                                        target_win = win
+                                        break
+                                    if "chrome" in app_name and "chrome" in w_title:
+                                        target_win = win
+                                        break
+                                    if ("edge" in app_name or "msedge" in app_name) and "edge" in w_title:
+                                        target_win = win
+                                        break
+                                    if "firefox" in app_name and "firefox" in w_title:
+                                        target_win = win
+                                        break
+
                         if target_win:
                             try:
                                 ctypes.windll.user32.keybd_event(0x12, 0, 0, 0)
@@ -416,6 +433,32 @@ class MediaModule(BaseModule):
                                     target_win.restore()
                                 ctypes.windll.user32.ShowWindow(target_win._hWnd, 9)
                                 ctypes.windll.user32.SetForegroundWindow(target_win._hWnd)
+                                
+                                # If it's a web browser and the currently active tab title is not the media tab, use Tab Search (Ctrl+Shift+A)
+                                is_browser = any(b in app_name or b in target_win.title.lower() for b in ['chrome', 'edge', 'firefox', 'brave', 'opera'])
+                                if is_browser and clean_words and not any(w in target_win.title.lower() for w in clean_words):
+                                    time.sleep(0.15)
+                                    # Send Ctrl+Shift+A (Chrome/Edge Tab Search)
+                                    ctypes.windll.user32.keybd_event(0x11, 0, 0, 0) # Ctrl
+                                    ctypes.windll.user32.keybd_event(0x10, 0, 0, 0) # Shift
+                                    ctypes.windll.user32.keybd_event(0x41, 0, 0, 0) # A
+                                    time.sleep(0.05)
+                                    ctypes.windll.user32.keybd_event(0x41, 0, 2, 0)
+                                    ctypes.windll.user32.keybd_event(0x10, 0, 2, 0)
+                                    ctypes.windll.user32.keybd_event(0x11, 0, 2, 0)
+                                    time.sleep(0.15)
+                                    
+                                    # Type the track keyword into tab search
+                                    search_query = clean_words[0]
+                                    for char in search_query:
+                                        vk = ctypes.windll.user32.VkKeyScanW(ord(char)) & 0xFF
+                                        if vk > 0:
+                                            ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
+                                            ctypes.windll.user32.keybd_event(vk, 0, 2, 0)
+                                    time.sleep(0.1)
+                                    # Press Enter to select the matching tab!
+                                    ctypes.windll.user32.keybd_event(0x0D, 0, 0, 0) # Enter
+                                    ctypes.windll.user32.keybd_event(0x0D, 0, 2, 0)
                             except Exception:
                                 pass
                     except Exception:
